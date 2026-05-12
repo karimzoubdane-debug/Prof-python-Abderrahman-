@@ -478,23 +478,14 @@ if __name__ == "__main__":
         };
 
         /* ── Appel API Claude (si clé fournie) ── */
-        const callClaude = async (apiKey, userRequest) => {
-            const body = {
-                model: "claude-opus-4-7",
-                max_tokens: 1024,
-                system: `Tu es un professeur Python. Quand l'utilisateur demande un programme, reponds avec une explication courte puis le code complet dans un bloc \`\`\`python ... \`\`\`. Code propre, commenté en français, sans input() si possible.`,
-                messages: [{ role: "user", content: userRequest }]
-            };
-
-            const res = await fetch("https://api.anthropic.com/v1/messages", {
+        const callClaude = async (userRequest) => {
+            const res = await fetch("/api/chat", {
                 method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    "x-api-key": apiKey,
-                    "anthropic-version": "2023-06-01",
-                    "anthropic-dangerous-request-access": "true"
-                },
-                body: JSON.stringify(body)
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    system: "Tu es un professeur Python. Quand l'utilisateur demande un programme, reponds avec une explication courte puis le code complet dans un bloc ```python ... ```. Code propre, commente en francais, sans input() si possible.",
+                    messages: [{ role: "user", content: userRequest }]
+                })
             });
 
             if (!res.ok) {
@@ -531,8 +522,6 @@ if __name__ == "__main__":
             const [messages, setMessages]           = useState([]);
             const [input, setInput]                 = useState("");
             const [loading, setLoading]             = useState(false);
-            const [apiKey, setApiKey]               = useState("");
-            const [apiKeyVisible, setApiKeyVisible] = useState(false);
             const [pyodide, setPyodide]             = useState(null);
             const [pyStatus, setPyStatus]           = useState("Pyodide: chargement...");
 
@@ -596,13 +585,12 @@ if __name__ == "__main__":
                     let codeForLibrary = null;
                     let projectName = text.slice(0, 40).trim();
 
-                    if (apiKey.trim()) {
-                        /* Mode API réelle */
-                        assistantText = await callClaude(apiKey.trim(), text);
+                    try {
+                        assistantText = await callClaude(text);
                         const extracted = extractCode(assistantText);
                         if (extracted) codeForLibrary = extracted;
-                    } else {
-                        /* Mode simulation */
+                    } catch {
+                        /* Fallback simulation si /api/chat echoue */
                         await new Promise(r => setTimeout(r, 900));
                         const result = simulateGenerate(text);
                         projectName = result.name;
@@ -769,22 +757,7 @@ def input(prompt=""):
                     <div className="header">
                         <div className="logo">Python Prof</div>
                         <div style={{ flex: 1 }} />
-                        <div className="api-container">
-                            <input
-                                type={apiKeyVisible ? "text" : "password"}
-                                className="api-input"
-                                placeholder="Cle API Anthropic (optionnelle)"
-                                value={apiKey}
-                                onChange={e => setApiKey(e.target.value)}
-                            />
-                            <button
-                                className="eye-btn"
-                                onClick={() => setApiKeyVisible(v => !v)}
-                                title={apiKeyVisible ? "Masquer" : "Afficher"}
-                            >
-                                {apiKeyVisible ? "[hide]" : "[show]"}
-                            </button>
-                        </div>
+                        <div style={{ fontSize: 11, color: "var(--mu)" }}>claude-haiku · simulation fallback</div>
                     </div>
 
                     <div className="main-layout">

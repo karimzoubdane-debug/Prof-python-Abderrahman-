@@ -481,12 +481,24 @@ if __name__ == "__main__":
         };
 
         /* ── Appel API Claude (si clé fournie) ── */
+        const SYSTEM_PROMPT = `Tu es un professeur Python pour debutants francophones.
+
+REGLES pour le code que tu produis :
+1. Reponds avec une courte explication (2-3 phrases) puis le code complet dans un bloc \`\`\`python ... \`\`\`.
+2. Le code doit etre AUTONOME et EXECUTABLE tel quel.
+3. Commente en francais, code propre, noms de variables explicites.
+4. Toujours definir main() et terminer par : if __name__ == "__main__": main()
+5. Si tu utilises input(), reste COURT (max 5 input()) et utilise des prompts clairs en francais.
+6. Bibliotheque standard uniquement : random, math, datetime, time, json, re, string. Pas de pip install.
+7. PAS de tkinter, pygame, matplotlib, requests (ne fonctionnent pas dans Pyodide).
+8. Enveloppe les conversions risquees (float(), int()) dans try/except ValueError.`;
+
         const callClaude = async (userRequest) => {
             const res = await fetch("/api/chat", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    system: "Tu es un professeur Python. Quand l'utilisateur demande un programme, reponds avec une explication courte puis le code complet dans un bloc ```python ... ```. Code propre, commente en francais, sans input() si possible.",
+                    system: SYSTEM_PROMPT,
                     messages: [{ role: "user", content: userRequest }]
                 })
             });
@@ -500,7 +512,41 @@ if __name__ == "__main__":
             return data.content[0].text;
         };
 
-        /* ── Rendu du contenu avec blocs de code + bouton copier ── */
+        /* ── Helper: enrobe le code Python avec un wrapper qui n'efface pas la console Windows ── */
+        const wrapPyForDownload = (code, name) => `# ${name || "Programme"}
+# Genere par Python Prof — https://prof-python-abderrahman.vercel.app
+
+import sys
+
+try:
+${code.split("\n").map(l => "    " + l).join("\n")}
+except KeyboardInterrupt:
+    print("\\n\\n[Programme interrompu]")
+except Exception as _e:
+    print(f"\\n\\n[Erreur : {type(_e).__name__}: {_e}]")
+    import traceback
+    traceback.print_exc()
+
+# Empeche la fenetre cmd de se fermer immediatement sous Windows
+try:
+    input("\\n--- Appuie sur Entree pour quitter ---")
+except EOFError:
+    pass
+`;
+
+        const triggerDownload = (filename, content) => {
+            const blob = new Blob([content], { type: "text/x-python;charset=utf-8" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        };
+
+        /* ── Rendu du contenu avec blocs de code + boutons copier/telecharger ── */
         const CodeBlock = ({ code }) => {
             const [copied, setCopied] = React.useState(false);
             const copy = () => {
@@ -509,17 +555,24 @@ if __name__ == "__main__":
                     setTimeout(() => setCopied(false), 2000);
                 });
             };
+            const download = () => {
+                triggerDownload("programme.py", wrapPyForDownload(code, "Programme Python Prof"));
+            };
+            const btnStyle = {
+                background: "var(--br)", color: "var(--tx)",
+                border: "none", borderRadius: 4, padding: "3px 10px",
+                fontSize: 11, cursor: "pointer", fontFamily: "inherit"
+            };
             return (
                 <div style={{ position: "relative", margin: "10px 0" }}>
-                    <button onClick={copy} style={{
-                        position: "absolute", top: 6, right: 6,
-                        background: copied ? "var(--g)" : "var(--br)",
-                        color: copied ? "#000" : "var(--tx)",
-                        border: "none", borderRadius: 4, padding: "3px 10px",
-                        fontSize: 11, cursor: "pointer", fontFamily: "inherit"
-                    }}>
-                        {copied ? "Copie !" : "Copier"}
-                    </button>
+                    <div style={{ position: "absolute", top: 6, right: 6, display: "flex", gap: 6 }}>
+                        <button onClick={copy} style={{ ...btnStyle, background: copied ? "var(--g)" : "var(--br)", color: copied ? "#000" : "var(--tx)" }}>
+                            {copied ? "Copie !" : "Copier"}
+                        </button>
+                        <button onClick={download} style={btnStyle} title="Telecharger en .py (avec pause de fin)">
+                            Telecharger
+                        </button>
+                    </div>
                     <pre style={{ paddingTop: 30 }}><code>{code}</code></pre>
                 </div>
             );
@@ -569,6 +622,8 @@ if __name__ == "__main__":
             const [quizAnswers, setQuizAnswers]     = useState({});
             const [execOutput, setExecOutput]       = useState("");
             const [executing, setExecuting]         = useState(false);
+            const [execMode, setExecMode]           = useState("interactive"); // "interactive" | "auto"
+            const [apiOk, setApiOk]                 = useState(null); // null | true | false
 
             const messagesEndRef = useRef(null);
 
@@ -614,15 +669,17 @@ if __name__ == "__main__":
 
                     try {
                         assistantText = await callClaude(text);
+                        setApiOk(true);
                         const extracted = extractCode(assistantText);
                         if (extracted) codeForLibrary = extracted;
-                    } catch {
+                    } catch (apiErr) {
                         /* Fallback simulation si /api/chat echoue */
-                        await new Promise(r => setTimeout(r, 900));
+                        setApiOk(false);
+                        await new Promise(r => setTimeout(r, 600));
                         const result = simulateGenerate(text);
                         projectName = result.name;
                         codeForLibrary = result.code;
-                        assistantText = `Voici le code Python pour "${result.name}" :\n\n\`\`\`python\n${result.code}\n\`\`\`\n\nTu peux l'executer directement via le bouton "Executer en direct".`;
+                        assistantText = `_(API Claude indisponible — mode demo : ${apiErr.message})_\n\nVoici un exemple de code pour "${result.name}" :\n\n\`\`\`python\n${result.code}\n\`\`\`\n\nClique sur "Executer (jouer)" pour le tester.`;
                     }
 
                     setMessages(prev => [...prev, { role: "assistant", content: assistantText }]);
@@ -713,7 +770,8 @@ if __name__ == "__main__":
             };
 
             /* ── Exécuter en direct ── */
-            const executeCode = async () => {
+            const executeCode = async (mode) => {
+                const chosenMode = mode || execMode;
                 const project = projects[selectedProject];
                 if (!project) return;
 
@@ -727,38 +785,74 @@ if __name__ == "__main__":
                     return;
                 }
 
+                // Expose un prompt JS interactif pour le mode "jouer"
+                window.pyPromptFn = (msg) => {
+                    const reply = window.prompt(msg && msg.length ? msg : "Saisie :");
+                    return reply === null ? "" : String(reply);
+                };
+
                 try {
                     const setupCode = `
 import sys
 import builtins
 from io import StringIO
+from js import window as _js_window
 
 _captured = StringIO()
 sys.stdout = _captured
+sys.stderr = _captured
 _input_count = 0
-_input_letters = list("aeioubcdflmnprstvy")
-_input_numbers = ["1", "2", "3", "4", "5"]
-_letter_idx = 0
-_number_idx = 0
+_input_log = []
 
-def _mock_input(prompt=""):
-    global _input_count, _letter_idx, _number_idx
+_MOCK_NUMBERS = ["3", "5", "7", "12", "2"]
+_MOCK_OPS = ["+", "-", "*", "/"]
+_MOCK_LETTERS = list("aeioubcdflmnprstvyhg")
+_MOCK_YESNO = ["o", "n", "o", "o", "n"]
+_MOCK_NAMES = ["Alice", "Bob", "Chloe"]
+_idx_num = 0
+_idx_op = 0
+_idx_letter = 0
+_idx_yn = 0
+_idx_name = 0
+
+INTERACTIVE = ${chosenMode === "interactive" ? "True" : "False"}
+
+def _smart_mock(prompt_text):
+    global _idx_num, _idx_op, _idx_letter, _idx_yn, _idx_name
+    p = prompt_text.lower()
+    # operateur
+    if "operation" in p or "operateur" in p or "+, -" in p or "(+" in p or "+ -" in p:
+        v = _MOCK_OPS[_idx_op % len(_MOCK_OPS)]; _idx_op += 1; return v
+    # oui/non
+    if "oui" in p and "non" in p:
+        v = _MOCK_YESNO[_idx_yn % len(_MOCK_YESNO)]; _idx_yn += 1; return v
+    # nom / prenom
+    if "nom" in p or "prenom" in p or "name" in p:
+        v = _MOCK_NAMES[_idx_name % len(_MOCK_NAMES)]; _idx_name += 1; return v
+    # lettre / caractere
+    if "lettre" in p or "letter" in p or "caractere" in p:
+        v = _MOCK_LETTERS[_idx_letter % len(_MOCK_LETTERS)]; _idx_letter += 1; return v
+    # nombre / chiffre / age / nb
+    if "nombre" in p or "chiffre" in p or "age" in p or "valeur" in p or "entier" in p or "nb " in p or "n =" in p:
+        v = _MOCK_NUMBERS[_idx_num % len(_MOCK_NUMBERS)]; _idx_num += 1; return v
+    # defaut: nombre
+    v = _MOCK_NUMBERS[_idx_num % len(_MOCK_NUMBERS)]; _idx_num += 1; return v
+
+def _patched_input(prompt=""):
+    global _input_count
     _input_count += 1
-    if _input_count > 60:
-        raise RuntimeError("Limite d'appels a input() atteinte — execution arretee")
+    if _input_count > 80:
+        raise RuntimeError("Limite de 80 appels a input() atteinte — boucle infinie probable")
     p = str(prompt)
-    _captured.write(p + "\\n")
-    pl = p.lower()
-    if "lettre" in pl or "letter" in pl or "caractere" in pl:
-        val = _input_letters[_letter_idx % len(_input_letters)]
-        _letter_idx += 1
-        return val
+    if INTERACTIVE:
+        val = _js_window.pyPromptFn(p)
     else:
-        val = _input_numbers[_number_idx % len(_input_numbers)]
-        _number_idx += 1
-        return val
+        val = _smart_mock(p)
+    _input_log.append((p, val))
+    _captured.write(p + str(val) + "\\n")
+    return val
 
-builtins.input = _mock_input
+builtins.input = _patched_input
 `;
                     pyodide.runPython(setupCode);
 
@@ -771,26 +865,47 @@ builtins.input = _mock_input
 
                     const output = pyodide.runPython("_captured.getvalue()");
                     const inputCount = pyodide.runPython("_input_count");
-                    let result = output.trim() || "(Aucune sortie)";
-                    if (inputCount > 0) {
-                        result += `\n\n[Note: ${inputCount} appel(s) a input() simules — saisies vides]`;
+                    let result = output.trim() || "(Aucune sortie produite)";
+                    if (inputCount > 0 && chosenMode === "auto") {
+                        result += `\n\n[Mode AUTO : ${inputCount} saisie(s) simulees. Pour jouer vraiment, utilise le bouton "Executer (jouer)".]`;
                     }
-                    if (execError && !execError.message.includes("Trop d'appels")) {
-                        result += `\n\nErreur: ${execError.message}`;
+                    if (execError) {
+                        const msg = String(execError.message || execError);
+                        // Nettoie le traceback pour ne garder que la derniere ligne utile
+                        const lines = msg.split("\n").filter(l => l.trim());
+                        const lastErr = lines[lines.length - 1] || msg;
+                        result += `\n\n--- Erreur Python ---\n${lastErr}`;
                     }
                     setExecOutput(result);
                 } catch (err) {
-                    setExecOutput(`Erreur: ${err.message}`);
+                    setExecOutput(`Erreur d'execution : ${err.message}`);
                 } finally {
                     try {
                         pyodide.runPython(`
 import sys, builtins
 sys.stdout = sys.__stdout__
+sys.stderr = sys.__stderr__
 builtins.input = input
 `);
                     } catch {}
                     setExecuting(false);
                 }
+            };
+
+            /* ── Télécharger le .py avec un ending sûr (pas de fermeture du terminal) ── */
+            const downloadPy = () => {
+                const project = projects[selectedProject];
+                if (!project) return;
+                const safeName = selectedProject.replace(/[^a-zA-Z0-9_-]/g, "_").toLowerCase() || "programme";
+                triggerDownload(`${safeName}.py`, wrapPyForDownload(project.code, selectedProject));
+            };
+
+            /* ── Réinitialiser la bibliothèque ── */
+            const resetLibrary = () => {
+                if (!confirm("Vider toute la bibliotheque ? Les projets par defaut (Pendu, Calculatrice) seront restaures.")) return;
+                try { localStorage.removeItem("python_projects"); } catch {}
+                setProjects(DEFAULT_PROJECTS);
+                setSelectedProject(Object.keys(DEFAULT_PROJECTS)[0]);
             };
 
             /* ── Supprimer un projet ── */
@@ -814,7 +929,15 @@ builtins.input = input
                     <div className="header">
                         <div className="logo">Python Prof</div>
                         <div style={{ flex: 1 }} />
-                        <div style={{ fontSize: 11, color: "var(--mu)" }}>claude-haiku · simulation fallback</div>
+                        <div style={{ fontSize: 11, color: "var(--mu)", display: "flex", alignItems: "center", gap: 8 }}>
+                            <span style={{
+                                display: "inline-block", width: 8, height: 8, borderRadius: "50%",
+                                background: apiOk === true ? "var(--g)" : apiOk === false ? "#ff4455" : "var(--mu)"
+                            }} />
+                            {apiOk === true ? "Claude Haiku connecte"
+                                : apiOk === false ? "Mode demo (API indisponible)"
+                                : "claude-haiku · en attente"}
+                        </div>
                     </div>
 
                     <div className="main-layout">
@@ -824,20 +947,37 @@ builtins.input = input
                             {Object.keys(projects).length === 0 && (
                                 <div style={{ color: "var(--mu)", fontSize: 12 }}>Aucun projet</div>
                             )}
-                            {Object.keys(projects).map(name => (
-                                <div
-                                    key={name}
-                                    className={`project-item${selectedProject === name ? " selected" : ""}`}
-                                >
-                                    <div onClick={() => setSelectedProject(name)} style={{ flex: 1 }}>
-                                        <div className="project-name">{name}</div>
-                                        <div style={{ fontSize: 10, color: "var(--mu)", marginTop: 2 }}>
-                                            {projects[name].code.slice(0, 50)}...
+                            {Object.keys(projects).map(name => {
+                                const firstLine = (projects[name].code || "")
+                                    .split("\n")
+                                    .find(l => l.trim() && !l.trim().startsWith("#")) || "";
+                                return (
+                                    <div
+                                        key={name}
+                                        className={`project-item${selectedProject === name ? " selected" : ""}`}
+                                    >
+                                        <div onClick={() => setSelectedProject(name)} style={{ flex: 1, minWidth: 0 }}>
+                                            <div className="project-name">{name}</div>
+                                            <div style={{
+                                                fontSize: 10, color: "var(--mu)", marginTop: 2,
+                                                fontFamily: "monospace",
+                                                whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis"
+                                            }}>
+                                                {firstLine.trim() || "(code vide)"}
+                                            </div>
                                         </div>
+                                        <button className="delete-project" onClick={() => deleteProject(name)}>x</button>
                                     </div>
-                                    <button className="delete-project" onClick={() => deleteProject(name)}>x</button>
-                                </div>
-                            ))}
+                                );
+                            })}
+
+                            <button
+                                className="action-btn"
+                                style={{ marginTop: 8, color: "#ff4455", borderColor: "rgba(255,68,85,0.3)" }}
+                                onClick={resetLibrary}
+                            >
+                                Vider la bibliotheque
+                            </button>
 
                             <div className="section-title" style={{ marginTop: 20 }}>Actions</div>
                             <button className="action-btn" onClick={explainCode}>
@@ -846,8 +986,14 @@ builtins.input = input
                             <button className="action-btn" onClick={generateQuiz}>
                                 Quiz Python
                             </button>
-                            <button className="action-btn primary" onClick={executeCode}>
-                                Executer en direct
+                            <button className="action-btn primary" onClick={() => executeCode("interactive")}>
+                                Executer (jouer)
+                            </button>
+                            <button className="action-btn" onClick={() => executeCode("auto")}>
+                                Executer (auto / demo)
+                            </button>
+                            <button className="action-btn" onClick={downloadPy}>
+                                Telecharger le .py
                             </button>
                         </div>
 

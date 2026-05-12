@@ -5,6 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Python Prof - Apprentissage interactif</title>
     <script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.7.0/mammoth.browser.min.js"></script>
+    <script>
+        if (window.pdfjsLib) {
+            window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+                "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+        }
+    </script>
     <script crossorigin src="https://unpkg.com/react@18.2.0/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -470,10 +478,18 @@ if __name__ == "__main__":
         };
 
         /* ── Appel API Claude (si clé fournie) ── */
-        const SYSTEM_PROMPT = `Tu es un assistant IA polyvalent francophone alimente par Claude Haiku.
+        const SYSTEM_PROMPT = `Tu es un assistant IA polyvalent alimente par Claude Haiku.
+Tu maitrises le francais, l'anglais et l'arabe — reponds TOUJOURS dans la langue de l'utilisateur
+ou dans la langue du document quand il en fournit un.
 
 Tu peux discuter de tout : culture, science, conseil, ecriture, philosophie, math, etc.
-Sois clair, concis, naturel. Reponds dans la langue de l'utilisateur (francais par defaut).
+Sois clair, concis, naturel.
+
+LECONS / DOCUMENTS : quand l'utilisateur t'envoie une lecon (entre "--- DEBUT LECON ---" et
+"--- FIN LECON ---") :
+- Pour un resume : produis des titres en gras, des listes a puces, et reste fidele au contenu.
+- Pour un quiz : 5 QCM (4 options A/B/C/D), puis "Reponses: 1-X, 2-Y..." a la fin.
+- Reponds dans la meme langue que la lecon (arabe → arabe, anglais → anglais, francais → francais).
 
 SPECIALITE Python : quand l'utilisateur demande un programme, fournis le code complet
 dans un bloc \`\`\`python ... \`\`\` en respectant ces regles :
@@ -619,6 +635,9 @@ except EOFError:
             const [execOutput, setExecOutput]       = useState("");
             const [executing, setExecuting]         = useState(false);
             const [apiOk, setApiOk]                 = useState(null); // null | true | false
+            const [lesson, setLesson]               = useState(null); // { name, text, lang }
+            const [lessonLoading, setLessonLoading] = useState(false);
+            const fileInputRef                      = useRef(null);
 
             const messagesEndRef = useRef(null);
 
@@ -649,6 +668,147 @@ except EOFError:
             }, [projects]);
 
             /* ── Envoyer un message ── */
+            /* ── Détection grossière de la langue dominante ── */
+            const detectLang = (text) => {
+                const sample = text.slice(0, 2000);
+                if (/[؀-ۿ]/.test(sample)) return "ar"; // arabe
+                const fr = (sample.match(/\b(le|la|les|un|une|des|de|du|et|est|que|qui|pour|dans|avec|sur)\b/gi) || []).length;
+                const en = (sample.match(/\b(the|a|an|of|and|to|is|that|in|on|with|for|are|this)\b/gi) || []).length;
+                return en > fr ? "en" : "fr";
+            };
+
+            /* ── Lit un fichier (.txt, .md, .pdf, .docx, image) et le stocke en tant que leçon ── */
+            const handleFileUpload = async (file) => {
+                if (!file) return;
+                setLessonLoading(true);
+                try {
+                    const name = file.name;
+                    const lower = name.toLowerCase();
+                    const mime = file.type || "";
+
+                    // ─── IMAGE : via la vision native de Claude (pas d'OCR local) ───
+                    if (mime.startsWith("image/")) {
+                        if (file.size > 5 * 1024 * 1024) {
+                            throw new Error("Image trop lourde (max 5 Mo).");
+                        }
+                        const dataUrl = await new Promise((res, rej) => {
+                            const r = new FileReader();
+                            r.onload = () => res(r.result);
+                            r.onerror = () => rej(new Error("Echec de lecture du fichier image."));
+                            r.readAsDataURL(file);
+                        });
+                        const base64 = dataUrl.split(",")[1];
+                        const mediaType = mime || "image/jpeg";
+                        setLesson({
+                            name, type: "image", mediaType, base64,
+                            dataUrl, lang: "auto",
+                            sizeKb: Math.round(file.size / 1024)
+                        });
+                        return;
+                    }
+
+                    // ─── DOCUMENT TEXTE : .txt, .md, .pdf, .docx ───
+                    let text = "";
+                    if (lower.endsWith(".pdf")) {
+                        if (!window.pdfjsLib) throw new Error("PDF.js n'est pas charge — recharge la page.");
+                        const arrayBuffer = await file.arrayBuffer();
+                        const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+                        const pages = [];
+                        for (let i = 1; i <= pdf.numPages; i++) {
+                            const page = await pdf.getPage(i);
+                            const content = await page.getTextContent();
+                            pages.push(content.items.map(it => it.str).join(" "));
+                        }
+                        text = pages.join("\n\n");
+                    } else if (lower.endsWith(".docx")) {
+                        if (!window.mammoth) throw new Error("Mammoth.js n'est pas charge — recharge la page.");
+                        const arrayBuffer = await file.arrayBuffer();
+                        const result = await window.mammoth.extractRawText({ arrayBuffer });
+                        text = result.value || "";
+                    } else if (lower.endsWith(".doc")) {
+                        throw new Error("Format .doc (ancien Word binaire) non supporte. Reenregistre en .docx ou .pdf.");
+                    } else {
+                        // .txt, .md, .text, autres textes simples
+                        text = await file.text();
+                    }
+
+                    text = text.trim();
+                    if (!text) throw new Error("Le fichier est vide ou illisible.");
+
+                    // Tronque si > 30 000 caracteres pour rester sous max_tokens
+                    let truncated = false;
+                    if (text.length > 30000) {
+                        text = text.slice(0, 30000);
+                        truncated = true;
+                    }
+
+                    const lang = detectLang(text);
+                    setLesson({ name, type: "text", text, lang, truncated, chars: text.length });
+                } catch (err) {
+                    alert(`Erreur de lecture : ${err.message}`);
+                } finally {
+                    setLessonLoading(false);
+                    if (fileInputRef.current) fileInputRef.current.value = "";
+                }
+            };
+
+            /* ── Helper : construit le contenu API d'un message utilisateur en y attachant la leçon ── */
+            const attachLessonTo = (userText) => {
+                if (!lesson) return userText;
+                if (lesson.type === "image") {
+                    return [
+                        { type: "image", source: { type: "base64", media_type: lesson.mediaType, data: lesson.base64 }},
+                        { type: "text", text: userText || "Decris cette image en detail." }
+                    ];
+                }
+                // text-based lesson
+                return `${userText}\n\n--- DEBUT LECON (${lesson.name}) ---\n${lesson.text}\n--- FIN LECON ---`;
+            };
+
+            /* ── Envoie une action sur la leçon (Résumé / Quiz) ── */
+            const askLessonAction = async (action) => {
+                if (!lesson || loading) return;
+
+                let promptText;
+                if (action === "resume") {
+                    promptText = lesson.type === "image"
+                        ? `Decris et resume le contenu de cette image (fichier: ${lesson.name}). Reponds dans la langue principale du document/de l'image.`
+                        : `Fais-moi un resume clair et structure de cette lecon (titres, listes a puces). Reponds dans la meme langue que la lecon.`;
+                } else if (action === "quiz") {
+                    promptText = lesson.type === "image"
+                        ? `A partir du contenu de cette image (fichier: ${lesson.name}), cree un quiz de 5 questions a choix multiples (4 options A/B/C/D). Termine par les bonnes reponses sous la forme: "Reponses: 1-X, 2-Y, ...". Reponds dans la langue principale de l'image.`
+                        : `Cree un quiz de 5 questions a choix multiples (4 options A/B/C/D) sur cette lecon. Termine par les bonnes reponses sous la forme: "Reponses: 1-X, 2-Y, ...". Reponds dans la meme langue que la lecon.`;
+                } else {
+                    return;
+                }
+
+                const displayText = action === "resume"
+                    ? `Resume "${lesson.name}"`
+                    : `Quiz sur "${lesson.name}"`;
+                const newMessages = [...messages, { role: "user", content: displayText }];
+                setMessages(newMessages);
+                setLoading(true);
+
+                try {
+                    // Construit l'historique avec la leçon attachée au dernier user message
+                    const history = newMessages.slice(-20).map(m => ({ role: m.role, content: m.content }));
+                    history[history.length - 1].content = attachLessonTo(promptText);
+
+                    let assistantText;
+                    try {
+                        assistantText = await callClaude(history);
+                        setApiOk(true);
+                    } catch (apiErr) {
+                        setApiOk(false);
+                        assistantText = `_(API Claude indisponible : ${apiErr.message})_`;
+                    }
+                    setMessages(prev => [...prev, { role: "assistant", content: assistantText }]);
+                } catch (err) {
+                    setMessages(prev => [...prev, { role: "assistant", content: `Erreur: ${err.message}` }]);
+                }
+                setLoading(false);
+            };
+
             const sendMessage = async () => {
                 const text = input.trim();
                 if (!text || loading) return;
@@ -667,6 +827,11 @@ except EOFError:
                     const history = [...messages, { role: "user", content: text }]
                         .slice(-20)
                         .map(m => ({ role: m.role, content: m.content }));
+
+                    // Si une leçon est chargée, on l'attache au dernier message utilisateur
+                    if (lesson) {
+                        history[history.length - 1].content = attachLessonTo(text);
+                    }
 
                     try {
                         assistantText = await callClaude(history);
@@ -975,11 +1140,92 @@ builtins.input = input
                                 <div ref={messagesEndRef} />
                             </div>
 
+                            {/* Bannière de leçon chargée */}
+                            {lesson && (
+                                <div style={{
+                                    margin: "0 20px",
+                                    padding: "10px 12px",
+                                    background: "rgba(0,204,136,0.10)",
+                                    border: "1px solid rgba(0,204,136,0.4)",
+                                    borderRadius: 8,
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 10,
+                                    flexWrap: "wrap",
+                                    fontSize: 12
+                                }}>
+                                    {lesson.type === "image" ? (
+                                        <img
+                                            src={lesson.dataUrl}
+                                            alt={lesson.name}
+                                            style={{
+                                                width: 42, height: 42, objectFit: "cover",
+                                                borderRadius: 6, border: "1px solid var(--br)"
+                                            }}
+                                        />
+                                    ) : (
+                                        <span style={{ fontSize: 22 }}>📄</span>
+                                    )}
+                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                        <div style={{ fontWeight: "bold", color: "var(--g)" }}>
+                                            {lesson.name}
+                                        </div>
+                                        <div style={{ color: "var(--mu)", fontSize: 11 }}>
+                                            {lesson.type === "image"
+                                                ? `Image · ${lesson.sizeKb} Ko · vision Claude`
+                                                : `${lesson.chars.toLocaleString()} caracteres · langue: ${lesson.lang}${lesson.truncated ? " · tronquée à 30k" : ""}`}
+                                        </div>
+                                    </div>
+                                    <button
+                                        className="action-btn"
+                                        style={{ width: "auto", margin: 0, padding: "6px 12px" }}
+                                        onClick={() => askLessonAction("resume")}
+                                        disabled={loading}
+                                    >
+                                        Résumé
+                                    </button>
+                                    <button
+                                        className="action-btn"
+                                        style={{ width: "auto", margin: 0, padding: "6px 12px" }}
+                                        onClick={() => askLessonAction("quiz")}
+                                        disabled={loading}
+                                    >
+                                        Quiz
+                                    </button>
+                                    <button
+                                        className="action-btn"
+                                        style={{ width: "auto", margin: 0, padding: "6px 10px", color: "#ff4455", borderColor: "rgba(255,68,85,0.3)" }}
+                                        onClick={() => setLesson(null)}
+                                        title="Retirer la leçon"
+                                    >
+                                        x
+                                    </button>
+                                </div>
+                            )}
+
                             <div className="input-area">
+                                <input
+                                    ref={fileInputRef}
+                                    type="file"
+                                    accept=".txt,.md,.text,.pdf,.docx,image/*,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                                    style={{ display: "none" }}
+                                    onChange={e => handleFileUpload(e.target.files?.[0])}
+                                />
+                                <button
+                                    className="send-btn"
+                                    onClick={() => fileInputRef.current?.click()}
+                                    disabled={lessonLoading}
+                                    title="Charger un document (.txt, .md, .pdf, .docx) ou une image"
+                                    style={{ background: "var(--b3)", color: "var(--tx)", padding: "0 14px", fontSize: 18 }}
+                                >
+                                    {lessonLoading ? "..." : "+"}
+                                </button>
                                 <textarea
                                     className="chat-input"
                                     rows={2}
-                                    placeholder="Decris le programme Python que tu veux creer..."
+                                    placeholder={lesson
+                                        ? `Pose une question sur "${lesson.name}" ou clique sur Résumé / Quiz...`
+                                        : "Discute avec Claude ou demande un programme Python..."}
                                     value={input}
                                     onChange={e => setInput(e.target.value)}
                                     onKeyDown={e => {
